@@ -18,6 +18,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const body = await req.json().catch(() => ({}))
   const depth: number = [1, 2, 3, 5].includes(body?.depth) ? body.depth : 5
+  // Requested fund-trace hop depth (1-3, default 2, hard max 3) — independent
+  // of the graph-reconstruction `depth` above.
+  const traceMaxHops: number =
+    Number.isFinite(body?.traceMaxHops) && body.traceMaxHops >= 1
+      ? Math.min(3, Math.round(body.traceMaxHops))
+      : 2
 
   const store = getStore()
   const scenario = getScenarioForCase(id)
@@ -91,6 +97,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // Reuse alerts already raised for this case's reported wallet so the
     // Investigation Intelligence engine can factor them into its risk read.
     alerts: store.alerts.filter((a) => a.caseId === id),
+    traceMaxHops,
   })
 
   // Persist derived case fields.

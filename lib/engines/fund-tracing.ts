@@ -1,6 +1,8 @@
 import type { AttributionCategory, Chain, DataProvenance, Transaction, VaspRecord } from "@/lib/types"
 import type { AnalysisContext } from "./context"
 import type { ExitPoint } from "./exitpoint"
+import { blockchain } from "@/lib/blockchain/service"
+import { isDemoSource } from "@/lib/blockchain/data-source"
 
 // ---------------------------------------------------------------------------
 // Multi-hop fund tracing.
@@ -407,14 +409,26 @@ function transactionsTouching(all: Transaction[], address: string): Transaction[
 // ---------------------------------------------------------------------------
 // Case-investigation integration.
 //
-// Runs the same FundTracingEngine directly against an already-built case
-// AnalysisContext, WITHOUT issuing any new blockchain fetches: `fetchNextHop`
-// simply looks up a counterparty's transactions inside the context's own
-// `ctx.transactions` pool (for demo scenarios this pool already spans the
-// full multi-hop graph; for a manual case it is whatever was fetched for the
-// root wallet). When a counterparty's activity is not present in that pool,
-// tracing gracefully stops on that branch rather than inventing data — the
-// engine's existing truncation reporting surfaces this honestly.
+// Runs the same FundTracingEngine against an already-built case
+// AnalysisContext. Two next-hop strategies, chosen per case:
+//
+//   - DEMO scenarios: context-only lookup. A demo scenario's full multi-hop
+//     graph is already baked into ctx.transactions by design, so no
+//     additional fetching is possible or honest — issuing live provider
+//     calls for a demo wallet would risk mixing real chain data into a
+//     deterministic scenario.
+//   - LIVE cases: real next-hop fetching through the SAME production
+//     provider layer (`@/lib/blockchain/service`) the wallet-investigation
+//     route and case-creation flow already use — never a second blockchain
+//     client, and still bounded by that service's own pagination caps plus
+//     FundTracingEngine's own node/address/timeout limits. If a counterparty
+//     lookup fails, is unconfigured, or itself falls back to demo data, this
+//     degrades to the context-only pool for that branch rather than
+//     fabricating data or mislabeling it as live.
+//
+// Either way, when a counterparty's activity is not available, tracing
+// gracefully stops on that branch — the engine's existing truncation
+// reporting surfaces this honestly.
 // ---------------------------------------------------------------------------
 export async function traceFundsFromContext(
   ctx: AnalysisContext,
@@ -432,6 +446,28 @@ export async function traceFundsFromContext(
     return null
   }
 
+  const canFetchLive = ctx.provenance === "LIVE_BLOCKCHAIN_DATA"
+
+  const fetchNextHop: HopFetcher = async (address, chain) => {
+    const contextual = transactionsTouching(ctx.transactions, address)
+    if (!canFetchLive) return { transactions: contextual, provenance: ctx.provenance }
+    try {
+      const res = await blockchain.getTransactions(address, chain)
+      if (isDemoSource(res.dataSource)) {
+        // The provider fell back to demo data for this specific counterparty
+        // (e.g. an unconfigured chain edge case). Never relabel that as
+        // live — prefer whatever this case's own real transaction pool
+        // already knows about the address instead.
+        return { transactions: contextual, provenance: ctx.provenance }
+      }
+      return { transactions: res.data, provenance: "LIVE_BLOCKCHAIN_DATA" }
+    } catch {
+      // Provider failure: fall back to the context-only pool for this
+      // branch rather than aborting the whole trace or inventing data.
+      return { transactions: contextual, provenance: ctx.provenance }
+    }
+  }
+
   const engine = new FundTracingEngine()
   return engine.trace({
     targetWallet: ctx.rootAddress,
@@ -440,9 +476,6 @@ export async function traceFundsFromContext(
     provenance: ctx.provenance,
     maxHops: options?.maxHops ?? DEFAULT_MAX_HOPS,
     attributionFor,
-    fetchNextHop: async (address) => ({
-      transactions: transactionsTouching(ctx.transactions, address),
-      provenance: ctx.provenance,
-    }),
+    fetchNextHop,
   })
 }

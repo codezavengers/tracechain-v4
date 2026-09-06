@@ -63,6 +63,7 @@ export default function CaseDetailPage() {
   const [msg, setMsg] = React.useState<string | null>(null)
   const [saveState, setSaveState] = React.useState<"idle" | "saving" | "saved" | "error">("idle")
   const [savedId, setSavedId] = React.useState<string | null>(null)
+  const [traceHops, setTraceHops] = React.useState(2)
 
   const canRun = user ? PERMISSIONS.runInvestigation(user.role) : false
   const canEdit = user ? PERMISSIONS.editCase(user.role) : false
@@ -72,15 +73,15 @@ export default function CaseDetailPage() {
   const inv = data?.investigation ?? null
   const graph = data?.graph ?? null
 
-  async function runInvestigation() {
+  async function runInvestigation(options?: { traceMaxHops?: number; focusTab?: string }) {
     if (!id) return
     setBusy("investigate")
     setMsg(null)
     try {
-      await apiPost(`/api/cases/${id}/investigate`, { depth: 5 })
+      await apiPost(`/api/cases/${id}/investigate`, { depth: 5, traceMaxHops: options?.traceMaxHops ?? traceHops })
       await mutate()
       setMsg("Investigation complete — intelligence refreshed.")
-      setTab("intelligence")
+      setTab(options?.focusTab ?? "intelligence")
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "Investigation failed.")
     } finally {
@@ -227,7 +228,7 @@ export default function CaseDetailPage() {
             </div>
           ) : null}
           {canRun ? (
-            <Button onClick={runInvestigation} disabled={busy === "investigate"}>
+            <Button onClick={() => runInvestigation()} disabled={busy === "investigate"}>
               {busy === "investigate" ? <Spinner className="text-primary-foreground" /> : <PlayCircle className="size-4" />}
               {inv ? "Re-run investigation" : "Run investigation"}
             </Button>
@@ -338,11 +339,42 @@ export default function CaseDetailPage() {
 
       {tab === "fundflow" ? (
         <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <GitBranch className="size-4 text-muted-foreground" />
-              Fund Flow
-            </CardTitle>
+          <CardHeader className="gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2">
+                <GitBranch className="size-4 text-muted-foreground" />
+                Fund Flow
+              </CardTitle>
+              {canRun ? (
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="tracehops" className="text-[11px] text-muted-foreground">
+                    Hop depth
+                  </Label>
+                  <Select
+                    id="tracehops"
+                    className="h-8 w-28 text-xs"
+                    value={String(traceHops)}
+                    onChange={(e) => setTraceHops(Number(e.target.value))}
+                    disabled={busy === "investigate"}
+                  >
+                    <option value="2">2 (default)</option>
+                    <option value="3">3 (max)</option>
+                  </Select>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => runInvestigation({ traceMaxHops: traceHops, focusTab: "fundflow" })}
+                    disabled={busy === "investigate"}
+                  >
+                    {busy === "investigate" ? <Spinner /> : <PlayCircle className="size-3.5" />} Re-run trace
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Changing hop depth re-runs the full multi-engine investigation with the new depth — this refreshes
+              every intelligence panel, not just the graph below.
+            </p>
           </CardHeader>
           <CardContent>
             {inv?.fundTrace ? (
@@ -354,7 +386,7 @@ export default function CaseDetailPage() {
                 description="Run the multi-engine investigation to trace how funds moved from the reported wallet across observed counterparties."
                 action={
                   canRun ? (
-                    <Button onClick={runInvestigation} disabled={busy === "investigate"}>
+                    <Button onClick={() => runInvestigation({ focusTab: "fundflow" })} disabled={busy === "investigate"}>
                       <PlayCircle className="size-4" /> Run investigation
                     </Button>
                   ) : undefined
@@ -386,7 +418,7 @@ export default function CaseDetailPage() {
             description="The intelligence board populates once the multi-engine investigation has been executed."
             action={
               canRun ? (
-                <Button onClick={runInvestigation} disabled={busy === "investigate"}>
+                <Button onClick={() => runInvestigation()} disabled={busy === "investigate"}>
                   <PlayCircle className="size-4" /> Run investigation
                 </Button>
               ) : undefined

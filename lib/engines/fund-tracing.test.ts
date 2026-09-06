@@ -1,4 +1,13 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it, vi, beforeEach } from "vitest"
+
+// Mocked so traceFundsFromContext's LIVE-case next-hop path can be exercised
+// without a real provider/network call. `blockchain.getTransactions` is the
+// same production entry point the wallet-investigation route and
+// case-creation flow already use.
+vi.mock("@/lib/blockchain/service", () => ({
+  blockchain: { getTransactions: vi.fn() },
+}))
+
 import {
   FundTracingEngine,
   DEFAULT_MAX_HOPS,
@@ -8,7 +17,10 @@ import {
   type HopFetchResult,
 } from "@/lib/engines/fund-tracing"
 import { buildContext } from "@/lib/engines/context"
+import { blockchain } from "@/lib/blockchain/service"
 import type { GraphNode, GraphEdge, Transaction } from "@/lib/types"
+
+const mockGetTransactions = blockchain.getTransactions as unknown as ReturnType<typeof vi.fn>
 
 function hopResult(overrides: Partial<HopFetchResult> = {}): HopFetchResult {
   return { transactions: [], provenance: "LIVE_BLOCKCHAIN_DATA", ...overrides }
@@ -351,5 +363,100 @@ describe("traceFundsFromContext (case-investigation integration)", () => {
     const vaspNode = graph.nodes.find((n) => n.id === VASP)
     expect(vaspNode?.type).toBe("VASP")
     expect(vaspNode?.vasp?.name).toBe("Demo Exchange")
+  })
+})
+
+describe("traceFundsFromContext — real next-hop fetching for LIVE cases", () => {
+  beforeEach(() => {
+    mockGetTransactions.mockReset()
+  })
+
+  function liveCtx(transactions: Transaction[]) {
+    return buildContext({
+      chain: "ethereum",
+      rootAddress: TARGET,
+      reportedLossUsd: 100,
+      nodes: [],
+      edges: [],
+      transactions,
+      depth: 1,
+      provenance: "LIVE_BLOCKCHAIN_DATA",
+    })
+  }
+
+  it("fetches a counterparty's transactions through the production provider layer when the case is LIVE", async () => {
+    const ctx = liveCtx([tx({ hash: "t1", from: TARGET, to: A })])
+    mockGetTransactions.mockResolvedValueOnce({
+      data: [tx({ hash: "t2", from: A, to: VASP })],
+      dataSource: "INDEXED",
+    })
+
+    const graph = await traceFundsFromContext(ctx, { maxHops: 2 })
+
+    expect(mockGetTransactions).toHaveBeenCalledWith(A, "ethereum")
+    expect(graph.hopsReached).toBe(2)
+    expect(graph.nodes.map((n) => n.id).sort()).toEqual([A, TARGET, VASP].sort())
+    expect(graph.provenance).toBe("LIVE_BLOCKCHAIN_DATA")
+  })
+
+  it("falls back to the context-only pool when the provider throws for a counterparty", async () => {
+    const ctx = liveCtx([tx({ hash: "t1", from: TARGET, to: A })])
+    mockGetTransactions.mockRejectedValueOnce(new Error("provider unavailable"))
+
+    const graph = await traceFundsFromContext(ctx, { maxHops: 2 })
+
+    expect(graph.hopsReached).toBe(2)
+    // A has no transactions in the context pool either, so the branch just
+    // yields nothing new — never fabricated, never a thrown/aborted trace.
+    expect(graph.nodes.map((n) => n.id).sort()).toEqual([A, TARGET].sort())
+  })
+
+  it("never relabels a provider's MOCK fallback as live for a single counterparty", async () => {
+    const ctx = liveCtx([tx({ hash: "t1", from: TARGET, to: A })])
+    mockGetTransactions.mockResolvedValueOnce({
+      data: [tx({ hash: "t2", from: A, to: VASP })],
+      dataSource: "MOCK",
+    })
+
+    const graph = await traceFundsFromContext(ctx, { maxHops: 2 })
+
+    // The MOCK result for A is discarded in favor of the (empty) context
+    // pool for that branch, so VASP is never added and the overall trace
+    // provenance stays LIVE (it never actually incorporated demo data).
+    expect(graph.nodes.some((n) => n.id === VASP)).toBe(false)
+    expect(graph.provenance).toBe("LIVE_BLOCKCHAIN_DATA")
+  })
+
+  it("does not call the live provider for a DEMO_DATA case", async () => {
+    const ctx = buildContext({
+      chain: "ethereum",
+      rootAddress: TARGET,
+      reportedLossUsd: 100,
+      nodes: [],
+      edges: [],
+      transactions: [tx({ hash: "t1", from: TARGET, to: A }), tx({ hash: "t2", from: A, to: VASP })],
+      depth: 1,
+      provenance: "DEMO_DATA",
+    })
+
+    const graph = await traceFundsFromContext(ctx, { maxHops: 2 })
+
+    expect(mockGetTransactions).not.toHaveBeenCalled()
+    expect(graph.hopsReached).toBe(2)
+    expect(graph.provenance).toBe("DEMO_DATA")
+  })
+
+  it("still enforces the absolute 3-hop maximum when chaining real provider fetches", async () => {
+    const ctx = liveCtx([tx({ hash: "t1", from: TARGET, to: A })])
+    mockGetTransactions.mockImplementation(async (address: string) => {
+      if (address === A) return { data: [tx({ hash: "t2", from: A, to: B })], dataSource: "INDEXED" }
+      if (address === B) return { data: [tx({ hash: "t3", from: B, to: VASP })], dataSource: "INDEXED" }
+      return { data: [], dataSource: "INDEXED" }
+    })
+
+    const graph = await traceFundsFromContext(ctx, { maxHops: 10 })
+
+    expect(graph.maxHops).toBe(ABSOLUTE_MAX_HOPS)
+    expect(graph.hopsReached).toBeLessThanOrEqual(ABSOLUTE_MAX_HOPS)
   })
 })
