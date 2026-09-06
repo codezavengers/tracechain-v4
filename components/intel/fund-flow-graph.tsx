@@ -1,11 +1,11 @@
 "use client"
 
 import * as React from "react"
-import { Info, Route } from "lucide-react"
-import { CopyAddress, AttributionBadge } from "@/components/intel/shared"
+import { Info, Route, ArrowRight } from "lucide-react"
+import { CopyAddress, AttributionBadge, ProvenanceBadge } from "@/components/intel/shared"
 import { Badge } from "@/components/ui/badge"
-import { usdOrUnknown, dateTime, shortAddr } from "@/lib/client/format"
-import type { TraceGraph, TraceNode, TraceEdge, TraceNodeType } from "@/lib/engines/fund-tracing"
+import { usdOrUnknown, dateTime, shortAddr, CHAIN_LABEL } from "@/lib/client/format"
+import type { TraceGraph, TraceNode, TraceEdge, TraceNodeType, TracePath } from "@/lib/engines/fund-tracing"
 
 const TYPE_COLOR: Record<TraceNodeType, string> = {
   TARGET: "var(--primary)",
@@ -74,13 +74,21 @@ export function FundFlowGraph({ graph }: { graph: TraceGraph }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
-        {(Object.keys(TYPE_LABEL) as TraceNodeType[]).map((t) => (
-          <span key={t} className="flex items-center gap-1.5">
-            <span className="size-2.5 rounded-full" style={{ background: TYPE_COLOR[t] }} />
-            {TYPE_LABEL[t]}
-          </span>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+          {(Object.keys(TYPE_LABEL) as TraceNodeType[]).map((t) => (
+            <span key={t} className="flex items-center gap-1.5">
+              <span className="size-2.5 rounded-full" style={{ background: TYPE_COLOR[t] }} />
+              {TYPE_LABEL[t]}
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Badge variant="outline" className="tabular">
+            {graph.hopsReached} of {graph.maxHops} hop{graph.maxHops === 1 ? "" : "s"} traced
+          </Badge>
+          <ProvenanceBadge provenance={graph.provenance} />
+        </div>
       </div>
 
       <div className="overflow-x-auto scrollbar-thin rounded-lg border border-border bg-[radial-gradient(circle_at_1px_1px,var(--border)_1px,transparent_0)] [background-size:22px_22px]">
@@ -154,11 +162,24 @@ export function FundFlowGraph({ graph }: { graph: TraceGraph }) {
         <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <CopyAddress address={node.id} full />
+            <Badge variant="outline" className="font-mono">
+              {shortAddr(node.id)}
+            </Badge>
             <Badge variant="outline" style={{ color: TYPE_COLOR[node.type], borderColor: `color-mix(in oklch, ${TYPE_COLOR[node.type]} 40%, transparent)` }}>
               {TYPE_LABEL[node.type]}
             </Badge>
             {node.attribution ? <AttributionBadge category={node.attribution} /> : null}
             {node.vasp ? <span className="text-muted-foreground">{node.vasp.name}</span> : null}
+          </div>
+          <div className="mb-3 grid gap-1.5 sm:grid-cols-2">
+            <DetailRow label="Chain" value={CHAIN_LABEL[node.chain]} />
+            <DetailRow label="Hop" value={String(node.hop)} />
+            <DetailRow label="Node type" value={TYPE_LABEL[node.type]} />
+            <DetailRow label="Attribution" value={node.attribution ?? "None"} />
+          </div>
+          <div className="mb-3 flex items-center justify-between rounded-sm border border-border/50 px-2 py-1.5">
+            <span className="text-muted-foreground">Provenance</span>
+            <ProvenanceBadge provenance={node.provenance} />
           </div>
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
             Transfers involving this wallet ({nodeEdges.length})
@@ -197,11 +218,73 @@ export function FundFlowGraph({ graph }: { graph: TraceGraph }) {
             <DetailRow label="Time" value={edge.timestamp ? dateTime(edge.timestamp) : "Unknown"} />
             <DetailRow label="From" value={edge.from} mono />
             <DetailRow label="To" value={edge.to} mono />
+            <DetailRow label="Direction" value={edge.direction === "outbound" ? "Outbound" : "Inbound"} />
+            <DetailRow label="Hop" value={String(edge.hop)} />
+          </div>
+          <div className="mt-2 flex items-center justify-between rounded-sm border border-border/50 px-2 py-1.5">
+            <span className="text-muted-foreground">Provenance</span>
+            <ProvenanceBadge provenance={edge.provenance} />
           </div>
         </div>
       ) : null}
 
+      {graph.paths.length > 0 ? <PathSummary paths={graph.paths} nodes={graph.nodes} edges={graph.edges} /> : null}
+
+      {graph.truncated ? (
+        <p className="text-[11px] text-muted-foreground text-pretty">
+          {graph.hopsReached} of {graph.maxHops} requested hop{graph.maxHops === 1 ? "" : "s"} traced. Partial trace —
+          not the full fund flow.
+        </p>
+      ) : null}
+
       <p className="text-[11px] text-muted-foreground text-pretty">{graph.summary}</p>
+    </div>
+  )
+}
+
+// Neutral, investigative-language walk of representative fund-flow paths.
+// Never implies criminality merely because a wallet appears in a path.
+function PathSummary({ paths, edges }: { paths: TracePath[]; nodes: TraceNode[]; edges: TraceEdge[] }) {
+  const edgeById = new Map(edges.map((e) => [e.id, e]))
+  const endLabel: Record<TraceNodeType, string> = {
+    TARGET: "No further movement observed",
+    COUNTERPARTY: "Direct counterparty endpoint",
+    INTERMEDIATE: "Intermediate wallet endpoint",
+    VASP: "Known VASP endpoint",
+  }
+  const shown = paths.slice(0, 6)
+
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <Route className="size-3.5" /> Observed transfer paths ({paths.length})
+      </div>
+      <div className="space-y-2">
+        {shown.map((p, i) => {
+          const totalUsd = p.edgeIds.reduce((sum, id) => sum + (edgeById.get(id)?.usdValue ?? 0), 0)
+          return (
+            <div key={i} className="rounded-sm border border-border/50 px-2 py-1.5">
+              <div className="flex flex-wrap items-center gap-1 font-mono text-[11px] text-muted-foreground">
+                {p.addresses.map((addr, idx) => (
+                  <React.Fragment key={`${addr}-${idx}`}>
+                    {idx > 0 ? <ArrowRight className="size-3 shrink-0 text-muted-foreground/60" /> : null}
+                    <span className={idx === 0 ? "text-foreground" : undefined}>{shortAddr(addr)}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {p.addresses.length - 1} hop{p.addresses.length - 1 === 1 ? "" : "s"} · {endLabel[p.endType]} ·
+                potential fund flow of {usdOrUnknown(totalUsd || null)}
+              </p>
+            </div>
+          )
+        })}
+      </div>
+      {paths.length > shown.length ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          {paths.length - shown.length} additional path(s) not shown.
+        </p>
+      ) : null}
     </div>
   )
 }

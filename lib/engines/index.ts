@@ -121,6 +121,9 @@ export async function runInvestigation(
     // Investigation Intelligence engine. Optional so seeding (which raises
     // alerts AFTER the investigation) can omit them safely.
     alerts?: Alert[]
+    // Requested fund-trace hop depth (1-3, default 2). Clamped again inside
+    // traceFundsFromContext/FundTracingEngine regardless of what is passed.
+    traceMaxHops?: number
   },
 ): Promise<InvestigationResult> {
   const risk = computeRisk(ctx)
@@ -177,7 +180,10 @@ export async function runInvestigation(
   // FUND TRACING: multi-hop fund-flow graph for the "Fund Flow" investigation
   // view. Built from this same context's transactions (no new fetching) and
   // enriched with the attribution ExitPoint AI already derived above.
-  const fundTrace = await traceFundsFromContext(ctx, { exitPoints: exitPoint.result.exitPoints })
+  const fundTrace = await traceFundsFromContext(ctx, {
+    exitPoints: exitPoint.result.exitPoints,
+    maxHops: meta.traceMaxHops,
+  })
 
   const journey = buildJourney(ctx, exitPoint.result)
 
